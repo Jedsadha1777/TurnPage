@@ -3,6 +3,10 @@
 TurnPage is a simple flipbook viewer built with HTML Canvas.
 It supports both direct PDF loading and pre-processed JSON with images, with smooth page-flip animation and mobile support.
 
+You can view a live demo here: 
+https://jedsadha1777.github.io/turnpage/
+
+
 ## Features
 - PDF direct loading or pre-processed images (low/high-res)
 - Page flip animation
@@ -89,5 +93,5 @@ new TurnPage('canvasId', {
 
 ## License
 
-This project is open-sourced under the [MIT license](https://opensource.org/licenses/MIT).
+This project is open-sourced under the [MIT license](https://opensource.org/licenses/MIT). 
 It also uses PDF.js https://github.com/mozilla/pdf.js, which is licensed under the Apache License 2.0.
