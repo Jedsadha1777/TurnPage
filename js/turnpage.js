@@ -22,12 +22,13 @@ class TurnPage {
             singlePageMode: options.singlePageMode !== undefined
                 ? options.singlePageMode
                 : autoMode, // ใช้ autoMode ถ้าไม่ได้กำหนดไว้
+            startWithCover: options.startWithCover !== false,
             autoDetectMode: options.autoDetectMode !== false, // เปิดใช้งาน auto-detect โดย default
             ...options
         };
 
         this.singlePageMode = this.options.singlePageMode;
-        this.calculateSize();
+        
 
         // Initialize properties
         this.totalPages = 0;
@@ -38,7 +39,7 @@ class TurnPage {
         this.isFlipping = false;
         this.flipDirection = 0;
         this.flipTarget = 0;
-        this.startWithCover = true;
+        this.startWithCover = this.options.startWithCover;
 
         this.isZoomed = false;
         this.zoomScale = 2;
@@ -94,13 +95,19 @@ class TurnPage {
                         this.singlePageMode = newMode;
                         this.updateModeButtons();
 
-                        //  snap currentPage ให้ถูกก่อน transform
-                        if (!this.singlePageMode) { // double mode
-                            if (this.currentPage > 0 && this.currentPage % 2 === 0) {
-                                this.currentPage -= 1;
-                            }
-                        }
-
+                       if (!this.singlePageMode && this.currentPage > 0) {
+                            if (this.startWithCover) {
+                                // Cover mode: snap to หน้าคี่ (1, 3, 5, ...)
+                                if (this.currentPage % 2 === 0) {
+                                    this.currentPage = Math.max(1, this.currentPage - 1);
+                                }
+                            } else {
+                                // Normal mode: snap to หน้าคู่ (0, 2, 4, ...)
+                                if (this.currentPage % 2 !== 0) {
+                                    this.currentPage = this.currentPage - 1;
+                                }
+                             }
+                         }
                         //  อัพเดท pagination ทันที
                         this.updatePageInfo();
                     }
@@ -167,62 +174,10 @@ class TurnPage {
                 }
                 // กรณีใช้ PDF 
                 else if (this.pdfDoc && this.pageViewports.length > 0) {
-                    const firstVp = this.pageViewports[0];
-                    if (firstVp) {
-                        const aspectRatio = firstVp.width / firstVp.height;
-
-                        const targetHeight = window.innerHeight;
-                        const maxWidth = window.innerWidth;
-
-                        let pageHeight = targetHeight;
-                        let pageWidth = pageHeight * aspectRatio;
-
-                        const pageCount = this.singlePageMode ? 1 : 2;
-                        const totalWidth = pageWidth * pageCount;
-
-                        if (totalWidth > maxWidth) {
-                            pageWidth = maxWidth / pageCount;
-                            pageHeight = pageWidth / aspectRatio;
-                        }
-
-                        const scaleRatio = pageHeight / this.pageHeight;
-
-                        this.pageWidth = pageWidth;
-                        this.pageHeight = pageHeight;
-
-                        // อัพเดท viewport 
-                        for (let i = 0; i < this.pageViewports.length; i++) {
-                            const oldVp = this.pageViewports[i];
-                            if (oldVp) {
-                                this.pageViewports[i] = {
-                                    width: oldVp.width * scaleRatio,
-                                    height: oldVp.height * scaleRatio
-                                };
-                            }
-                        }
-
-                        // อัพเดท links 
-                        for (let i = 0; i < this.pageLinks.length; i++) {
-                            const links = this.pageLinks[i];
-                            if (links && links.length > 0) {
-                                this.pageLinks[i] = links.map(link => {
-                                    if (link.transformedRect) {
-                                        const [x1, y1, x2, y2] = link.transformedRect;
-                                        return {
-                                            ...link,
-                                            transformedRect: [
-                                                x1 * scaleRatio,
-                                                y1 * scaleRatio,
-                                                x2 * scaleRatio,
-                                                y2 * scaleRatio
-                                            ]
-                                        };
-                                    }
-                                    return link;
-                                });
-                            }
-                        }
-                    }
+                    // PDF mode: ล้างข้อมูลและให้ loadPageRange() สร้างใหม่
+                   this.pages = new Array(this.totalPages);
+                   this.pageViewports = new Array(this.totalPages);
+                   this.pageLinks = new Array(this.totalPages);
                 }
 
                 this.calculateSize();
@@ -387,22 +342,28 @@ class TurnPage {
             this.totalPages = this.pdfDoc.numPages;
             this.pdfFileName = file.name;
 
-            const firstPage = await this.pdfDoc.getPage(1);
-            const raw = firstPage.getViewport({ scale: 1 });
-            const ratio = raw.width / raw.height;
-            let pageHeight = window.innerHeight;
+            // ดึงข้อมูล viewport จากหน้าแรก
+             const firstPage = await this.pdfDoc.getPage(1);
+             const raw = firstPage.getViewport({ scale: 1 });
+             const ratio = raw.width / raw.height;
+            
+            // คำนวณขนาดหน้ากระดาษ
+             const maxWidth = window.innerWidth;
+            const targetHeight = window.innerHeight;
+            const pageCount = this.singlePageMode ? 1 : 2;
+            
+            let pageHeight = targetHeight;
             let pageWidth = pageHeight * ratio;
-            const maxWidth = window.innerWidth;
-            const count = this.singlePageMode ? 1 : 2;
-            if (pageWidth * count > maxWidth) {
-                pageWidth = maxWidth / count;
-                pageHeight = pageWidth / ratio;
+            
+            if (pageWidth * pageCount > maxWidth) {
+                pageWidth = maxWidth / pageCount;
+                 pageHeight = pageWidth / ratio;
             }
+
             this.pageWidth = pageWidth;
             this.pageHeight = pageHeight;
 
             this.currentPage = 0;
-            this.isZoomed = false;
             this.panX = 0;
             this.panY = 0;
             this.isPanning = false;
@@ -415,11 +376,13 @@ class TurnPage {
             this.pageLinks = new Array(this.totalPages);
             this.pageViewports = new Array(this.totalPages);
 
+            this.calculateSize();
+
+
             const initialPages = this.singlePageMode ? 2 : 4;
             await this.loadPageRange(0, Math.min(initialPages - 1, this.totalPages - 1), false, false);
 
-            // คำนวณขนาดใหม่หลังจากได้ viewport จาก PDF แล้ว
-            this.calculateSize();
+           
 
             this.isLoading = false;
             this.updatePageInfo();
@@ -969,10 +932,19 @@ class TurnPage {
         if (this.singlePageMode) {
             this.currentPage = pageIndex;
         } else {
-            if (pageIndex === 0) {
-                this.currentPage = 0;
+
+            if (this.startWithCover) {
+                // แบบมี blank page: 0 (cover), 1-2, 3-4, 5-6, ...
+                if (pageIndex === 0) {
+                    this.currentPage = 0;
+                } else {
+                    // snap ไปหน้าคี่: 1, 3, 5, 7, ...
+                    this.currentPage = pageIndex % 2 === 0 ? pageIndex - 1 : pageIndex;
+                }
             } else {
-                this.currentPage = pageIndex % 2 === 0 ? pageIndex - 1 : pageIndex;
+                // แบบไม่มี blank page: 0-1, 2-3, 4-5, ...
+                // snap ไปหน้าคู่: 0, 2, 4, 6, ...
+                this.currentPage = pageIndex % 2 === 0 ? pageIndex : pageIndex - 1;
             }
         }
 
@@ -1034,11 +1006,23 @@ class TurnPage {
         let target = this.currentPage + dir * step;
 
         if (!this.singlePageMode) {
-            if (this.currentPage === 0 && dir > 0) {
-                target = 1;
-            } else if (target === -1 || target === -2) {
-                target = 0;
-            }
+            if (this.startWithCover) {
+                // แบบมี blank page (cover mode)
+                // Next: 0→1, 1→3, 3→5, 5→7...
+                // Prev: 1→0, 3→1, 5→3, 7→5...
+                if (this.currentPage === 0 && dir > 0) {
+                    target = 1;
+                } else if (target === -1 || target === -2) {
+                    target = 0;
+                }
+            } else {
+                // แบบไม่มี blank page (normal mode)
+                // Next: 0→2, 2→4, 4→6...
+                // Prev: 2→0, 4→2, 6→4...
+                if (target < 0) {
+                    target = 0;
+                }
+             }
         }
 
         if (target < 0) return;
@@ -1095,9 +1079,20 @@ class TurnPage {
 
         this.singlePageMode = singlePage;
 
-        if (!singlePage && this.currentPage > 0 && this.currentPage % 2 !== 0) {
-            this.currentPage = Math.max(0, this.currentPage - 1);
-        }
+         // Snap currentPage เมื่อเปลี่ยนเป็นหน้าคู่
+        if (!singlePage && this.currentPage > 0) {
+            if (this.startWithCover) {
+                  // Cover mode: snap to หน้าคี่ (1, 3, 5, ...)
+                if (this.currentPage % 2 === 0) {
+                    this.currentPage = Math.max(1, this.currentPage - 1);
+                }
+            } else {
+                 // Normal mode: snap to หน้าคู่ (0, 2, 4, ...)
+                if (this.currentPage % 2 !== 0) {
+                    this.currentPage = this.currentPage - 1;
+                }
+            }
+         }
 
         document.getElementById('doublePageBtn').classList.toggle('active', !singlePage);
         document.getElementById('singlePageBtn').classList.toggle('active', singlePage);
@@ -1163,13 +1158,15 @@ class TurnPage {
 
         this.calculateSize();
 
+
         if (this.pdfDoc) {
             this.isLoading = true;
             this.updatePageInfo();
 
-            this.pages = new Array(this.totalPages);
-            this.pageLinks = new Array(this.totalPages);
+            this.pages = new Array(this.totalPages);            
             this.pageViewports = new Array(this.totalPages);
+
+            this.pageLinks = new Array(this.totalPages);
 
             const bufferPages = 3;
             const requiredPages = this.singlePageMode
@@ -1183,13 +1180,14 @@ class TurnPage {
 
             for (const pageIdx of requiredPages) {
                 await this.loadPageRange(pageIdx, pageIdx, false, false);
+
             }
 
             if (loadEnd > this.currentPage + (this.singlePageMode ? 0 : 1)) {
                 this.loadPageRange(
                     this.currentPage + (this.singlePageMode ? 1 : 2),
                     loadEnd,
-                    false,
+                     false,
                     false
                 );
             }
@@ -1204,8 +1202,7 @@ class TurnPage {
                 }
 
             }, 300);
-        }
-
+        }      
         this.updatePageInfo();
     }
 
@@ -1242,14 +1239,21 @@ class TurnPage {
         } else {
             // โหมดหน้าคู่
             if (this.currentPage === 0) {
-                // แสดง cover page
-                info.textContent = ` 1 / ${this.totalPages}`;
+                 info.textContent = this.startWithCover 
+                    ? ` 1 / ${this.totalPages}`
+                    : ` 1-2 / ${this.totalPages}`;
             } else {
                 const rightPage = this.currentPage + 1;
                 if (rightPage < this.totalPages) {
-                    info.textContent = ` ${this.currentPage + 1}-${rightPage + 1} / ${this.totalPages}`;
+                    // แสดงเลขหน้า: เสมอ +1 เพื่อแปลงจาก 0-based เป็น 1-based
+                    const leftDisplay = this.currentPage + 1;
+                    const rightDisplay = rightPage + 1;
+
+                    info.textContent = ` ${leftDisplay}-${rightDisplay} / ${this.totalPages}`;
+
                 } else {
-                    info.textContent = ` ${this.currentPage + 1} / ${this.totalPages}`;
+                    const leftDisplay = this.currentPage + 1;
+                    info.textContent = ` ${leftDisplay} / ${this.totalPages}`;
                 }
             }
         }
@@ -1261,11 +1265,19 @@ class TurnPage {
             // โหมดหน้าเดี่ยว → หน้าสุดท้ายปกติ
             isLastSpread = this.currentPage >= this.totalPages - 1;
         } else {
-            // โหมดหน้าคู่ → มี cover (blank+1) เป็น spread แรก
-            const totalSpreads = Math.ceil((this.totalPages - 1) / 2) + 1;
-            const currentSpread = this.currentPage === 0
-                ? 0
-                : Math.ceil((this.currentPage + 1) / 2);
+            // โหมดหน้าคู่
+            let totalSpreads, currentSpread;
+            if (this.startWithCover) {
+                // มี cover (blank+1) เป็น spread แรก
+                totalSpreads = Math.ceil((this.totalPages - 1) / 2) + 1;
+                currentSpread = this.currentPage === 0
+                    ? 0
+                    : Math.ceil((this.currentPage + 1) / 2);
+            } else {
+                // ไม่มี blank page, เริ่มจาก 1-2
+                totalSpreads = Math.ceil(this.totalPages / 2);
+                currentSpread = Math.floor(this.currentPage / 2);
+            }
             isLastSpread = currentSpread >= totalSpreads - 1;
         }
 
@@ -1319,8 +1331,14 @@ class TurnPage {
             progress = maxPage > 0 ? this.currentPage / maxPage : 0;
         } else {
             // หน้าคู่ คำนวณ progress จากจำนวน spread
-            const spreads = Math.ceil((this.totalPages - 1) / 2) + 1; // +1 สำหรับ cover
-            const currentSpread = this.currentPage === 0 ? 0 : Math.ceil((this.currentPage + 1) / 2);
+            let spreads, currentSpread;
+            if (this.startWithCover) {
+                spreads = Math.ceil((this.totalPages - 1) / 2) + 1;
+                currentSpread = this.currentPage === 0 ? 0 : Math.ceil((this.currentPage + 1) / 2);
+            } else {
+                spreads = Math.ceil(this.totalPages / 2);
+                currentSpread = Math.floor(this.currentPage / 2);
+            }
             progress = spreads > 1 ? currentSpread / (spreads - 1) : 0;
         }
 
@@ -1334,28 +1352,35 @@ class TurnPage {
     updateScrollPosition(progress) {
         if (this.totalPages === 0) return;
 
-        const step = this.singlePageMode ? 1 : 2;
-        let maxPage, targetPage;
+        let targetPage;
 
         if (this.singlePageMode) {
-            maxPage = this.totalPages - 1;
+            const maxPage = this.totalPages - 1;
             targetPage = Math.round(progress * maxPage);
         } else {
-            // โหมดหน้าคู่: 0 (cover), 1, 3, 5, 7, ...
-            const spreads = Math.ceil((this.totalPages - 1) / 2);
-            const targetSpread = Math.round(progress * spreads);
-            targetPage = targetSpread === 0 ? 0 : (targetSpread * 2 - 1);
+            // โหมดหน้าคู่
+            if (this.startWithCover) {
+                // มี cover: spread 0=page0, spread 1=page1, spread 2=page3, ...
+                // จำนวน spread = 1 (cover) + ceil((total-1)/2)
+                const totalSpreads = 1 + Math.ceil((this.totalPages - 1) / 2);
+                const targetSpread = Math.round(progress * (totalSpreads - 1));
+
+                if (targetSpread === 0) {
+                    targetPage = 0;  // cover
+                } else {
+                    // spread 1→page 1, spread 2→page 3, spread 3→page 5
+                    targetPage = targetSpread * 2 - 1;
+                }
+            } else {
+                // ไม่มี cover: spread 0=page0, spread 1=page2, spread 2=page4, ...
+                const spreads = Math.ceil(this.totalPages / 2);
+                const targetSpread = Math.round(progress * (spreads - 1));
+                targetPage = targetSpread * 2;
+            }
+
         }
 
         targetPage = Math.max(0, Math.min(this.totalPages - 1, targetPage));
-
-
-
-        const trackWidth = this.scrollTrack.offsetWidth;
-        const thumbWidth = this.scrollThumb.offsetWidth;
-        const thumbLeft = progress * (trackWidth - thumbWidth);
-
-
         if (targetPage !== this.currentPage) {
             this.goToPage(targetPage);
         }
@@ -2012,25 +2037,40 @@ class TurnPage {
                 this.drawLinks(this.currentPage, pageX, topY);
             } else {
                 // โหมดหน้าคู่
-                if (this.currentPage === 0) {
-                    // หน้า cover - ซ้ายเป็นหน้าว่าง, ขวาเป็น cover
-                    this.drawBlankPage(cx - this.pageWidth, topY);
-                    if (this.pages[0]) {
-                        this.drawPage(cx, topY, this.pages[0]);
-                        this.drawLinks(0, cx, topY);
+                if (this.startWithCover) {
+                    // แบบมี blank page (cover mode)
+                    if (this.currentPage === 0) {
+                        this.drawBlankPage(cx - this.pageWidth, topY);
+                        if (this.pages[0]) {
+                            this.drawPage(cx, topY, this.pages[0]);
+                            this.drawLinks(0, cx, topY);
+                        }
+                    } else {
+                        // หน้าซ้าย
+                        if (leftIdx < this.totalPages && this.pages[leftIdx]) {
+                            this.drawPage(cx - this.pageWidth, topY, this.pages[leftIdx]);
+                            this.drawLinks(leftIdx, cx - this.pageWidth, topY);
+                        }
+                        // หน้าขวา
+                        if (rightIdx < this.totalPages && this.pages[rightIdx]) {
+                            this.drawPage(cx, topY, this.pages[rightIdx]);
+                            this.drawLinks(rightIdx, cx, topY);
+                        } else if (rightIdx >= this.totalPages) {
+                            this.drawBlankPage(cx, topY);
+                        }
                     }
                 } else {
+                    // แบบไม่มี blank page (normal mode)
                     // หน้าซ้าย
                     if (leftIdx < this.totalPages && this.pages[leftIdx]) {
                         this.drawPage(cx - this.pageWidth, topY, this.pages[leftIdx]);
                         this.drawLinks(leftIdx, cx - this.pageWidth, topY);
                     }
-
-                    // หน้าขวา - ใช้ logic เดียวกับ animation
+                    // หน้าขวา
                     if (rightIdx < this.totalPages && this.pages[rightIdx]) {
                         this.drawPage(cx, topY, this.pages[rightIdx]);
                         this.drawLinks(rightIdx, cx, topY);
-                    } else if (rightIdx >= this.totalPages) {
+                    } else {
                         this.drawBlankPage(cx, topY);
                     }
                 }
@@ -2073,44 +2113,64 @@ class TurnPage {
                 const scaleX = Math.cos(angle);
 
                 if (this.flipDirection > 0) {
-                    // กรณีพิเศษ: จากหน้า 0 (cover) ไปหน้า 1-2
-                    if (this.currentPage === 0) {
-                        // วาดพื้นหลังคงที่: blank (ซ้าย) และ หน้า 2 (ขวา)
-                        this.drawBlankPage(cx - this.pageWidth, topY);
-                        if (this.pages[2]) {
-                            this.drawPage(cx, topY, this.pages[2]);
-                        }
-
-                        // Animation: พลิกหน้า cover จากขวา
-                        this.ctx.save();
-                        this.ctx.translate(cx, 0);
-                        if (scaleX > 0) {
-                            // ด้านหน้า = cover
-                            this.ctx.scale(scaleX, 1);
-                            if (this.pages[0]) {
-                                this.drawPage(0, topY, this.pages[0]);
+                    if (this.startWithCover) {
+                        // แบบมี blank page (cover mode)
+                        if (this.currentPage === 0) {
+                            this.drawBlankPage(cx - this.pageWidth, topY);
+                            if (this.pages[2]) {
+                                this.drawPage(cx, topY, this.pages[2]);
                             }
+                            this.ctx.save();
+                            this.ctx.translate(cx, 0);
+                            if (scaleX > 0) {
+                                this.ctx.scale(scaleX, 1);
+                                if (this.pages[0]) {
+                                    this.drawPage(0, topY, this.pages[0]);
+                                }
+                            } else {
+                                this.ctx.scale(-scaleX, 1);
+                                if (this.pages[1]) {
+                                    this.drawPage(-this.pageWidth, topY, this.pages[1]);
+                                }
+                            }
+                            this.ctx.restore();
                         } else {
-                            // ด้านหลัง = หน้า 1
-                            this.ctx.scale(-scaleX, 1);
-                            if (this.pages[1]) {
-                                this.drawPage(-this.pageWidth, topY, this.pages[1]);
+                            // กรณีปกติ
+                            if (leftIdx + 2 < this.totalPages && this.pages[leftIdx + 2]) {
+                                this.drawPage(cx - this.pageWidth, topY, this.pages[leftIdx + 2]);
                             }
+                            if (rightIdx + 2 < this.totalPages && this.pages[rightIdx + 2]) {
+                                this.drawPage(cx, topY, this.pages[rightIdx + 2]);
+                            }
+                            if (leftIdx < this.totalPages && this.pages[leftIdx]) {
+                                this.drawPage(cx - this.pageWidth, topY, this.pages[leftIdx]);
+                            }
+                            this.ctx.save();
+                            this.ctx.translate(cx, 0);
+                            if (scaleX > 0) {
+                                this.ctx.scale(scaleX, 1);
+                                if (rightIdx < this.totalPages && this.pages[rightIdx]) {
+                                    this.drawPage(0, topY, this.pages[rightIdx]);
+                                }
+                            } else {
+                                this.ctx.scale(-scaleX, 1);
+                                if (rightIdx + 1 < this.totalPages && this.pages[rightIdx + 1]) {
+                                    this.drawPage(-this.pageWidth, topY, this.pages[rightIdx + 1]);
+                                }
+                            }
+                            this.ctx.restore();
                         }
-                        this.ctx.restore();
                     } else {
-                        // กรณีปกติ
+                        // แบบไม่มี blank page
                         if (leftIdx + 2 < this.totalPages && this.pages[leftIdx + 2]) {
                             this.drawPage(cx - this.pageWidth, topY, this.pages[leftIdx + 2]);
                         }
                         if (rightIdx + 2 < this.totalPages && this.pages[rightIdx + 2]) {
                             this.drawPage(cx, topY, this.pages[rightIdx + 2]);
                         }
-
                         if (leftIdx < this.totalPages && this.pages[leftIdx]) {
                             this.drawPage(cx - this.pageWidth, topY, this.pages[leftIdx]);
                         }
-
                         this.ctx.save();
                         this.ctx.translate(cx, 0);
                         if (scaleX > 0) {
@@ -2127,43 +2187,62 @@ class TurnPage {
                         this.ctx.restore();
                     }
                 } else {
-                    // กรณีพิเศษ: กลับมาหน้า 0 (cover)
-                    if (this.flipTarget === 0) {
-                        // วาดหน้าว่างด้านซ้าย
-                        this.drawBlankPage(cx - this.pageWidth, topY);
-
-                        // วาดหน้า 2 ด้านขวา
-                        if (this.pages[2]) {
-                            this.drawPage(cx, topY, this.pages[2]);
-                        }
-
-                        // Animation: พลิกหน้า 1 กลับ
-                        this.ctx.save();
-                        this.ctx.translate(cx, 0);
-                        if (scaleX > 0) {
-                            this.ctx.scale(scaleX, 1);
-                            if (this.pages[1]) {
-                                this.drawPage(-this.pageWidth, topY, this.pages[1]);
+                    if (this.startWithCover) {
+                        // แบบมี blank page (cover mode)
+                        if (this.flipTarget === 0) {
+                            this.drawBlankPage(cx - this.pageWidth, topY);
+                            if (this.pages[2]) {
+                                this.drawPage(cx, topY, this.pages[2]);
                             }
+                            this.ctx.save();
+                            this.ctx.translate(cx, 0);
+                            if (scaleX > 0) {
+                                this.ctx.scale(scaleX, 1);
+                                if (this.pages[1]) {
+                                    this.drawPage(-this.pageWidth, topY, this.pages[1]);
+                                }
+                            } else {
+                                this.ctx.scale(-scaleX, 1);
+                                if (this.pages[0]) {
+                                    this.drawPage(0, topY, this.pages[0]);
+                                }
+                            }
+                            this.ctx.restore();
                         } else {
-                            this.ctx.scale(-scaleX, 1);
-                            if (this.pages[0]) {
-                                this.drawPage(0, topY, this.pages[0]);
+                            // กรณีปกติ
+                            if (leftIdx - 2 >= 0 && this.pages[leftIdx - 2]) {
+                                this.drawPage(cx - this.pageWidth, topY, this.pages[leftIdx - 2]);
                             }
+                            if (rightIdx >= this.totalPages) {
+                                this.drawBlankPage(cx, topY);
+                            } else if (rightIdx < this.totalPages && this.pages[rightIdx]) {
+                                this.drawPage(cx, topY, this.pages[rightIdx]);
+                            }
+                            this.ctx.save();
+                            this.ctx.translate(cx, 0);
+                            if (scaleX > 0) {
+                                this.ctx.scale(scaleX, 1);
+                                if (leftIdx < this.totalPages && this.pages[leftIdx]) {
+                                    this.drawPage(-this.pageWidth, topY, this.pages[leftIdx]);
+                                }
+                            } else {
+                                this.ctx.scale(-scaleX, 1);
+                                if (leftIdx - 1 >= 0 && this.pages[leftIdx - 1]) {
+                                    this.drawPage(0, topY, this.pages[leftIdx - 1]);
+                                }
+                            }
+                            this.ctx.restore();
                         }
-                        this.ctx.restore();
                     } else {
-                        // กรณีปกติ
+                        // แบบไม่มี blank page
                         if (leftIdx - 2 >= 0 && this.pages[leftIdx - 2]) {
                             this.drawPage(cx - this.pageWidth, topY, this.pages[leftIdx - 2]);
                         }
-
                         if (rightIdx >= this.totalPages) {
                             this.drawBlankPage(cx, topY);
                         } else if (rightIdx < this.totalPages && this.pages[rightIdx]) {
                             this.drawPage(cx, topY, this.pages[rightIdx]);
                         }
-
                         this.ctx.save();
                         this.ctx.translate(cx, 0);
                         if (scaleX > 0) {
@@ -2179,6 +2258,7 @@ class TurnPage {
                         }
                         this.ctx.restore();
                     }
+
                 }
             }
         }
