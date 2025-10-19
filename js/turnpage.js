@@ -83,7 +83,7 @@ class PageInfoFormatter {
     /* ===== จัดรูปแบบข้อความแสดงหน้าปัจจุบัน ===== */
     static format(currentPage, totalPages, singlePageMode, startWithCover) {
         if (totalPages === 0) return '';
-        
+
         if (singlePageMode) {
             return ` ${currentPage + 1} / ${totalPages}`;
         }
@@ -114,7 +114,7 @@ class PageInfoFormatter {
 
         const totalSpreads = PageCalculator.getSpreadCount(totalPages, startWithCover);
         const currentSpread = PageCalculator.getCurrentSpread(currentPage, startWithCover);
-        
+
         return currentSpread >= totalSpreads - 1;
     }
 
@@ -245,7 +245,12 @@ class TurnPage {
         HIGH_RES_DELAY_MS: 300,
         HIGH_RES_LOAD_DELAY_MS: 500,
         HIGH_RES_INITIAL_DELAY_MS: 100,
-        SINGLE_CLICK_DELAY_MS: 300
+        SINGLE_CLICK_DELAY_MS: 300,
+
+        // Rubber Band Effect
+        RUBBER_BAND_RESISTANCE: 0.3,      // ความแข็งของยาง (0-1, น้อย = ยืดง่าย)
+        RUBBER_BAND_SNAP_DURATION: 300,   // เวลาดีดกลับ (ms)
+        RUBBER_BAND_MAX_DISTANCE: 80,     // ระยะยืดสุด (px)
     };
 
 
@@ -314,6 +319,17 @@ class TurnPage {
 
         this.lastTouchTime = null;
         this.touchTimeout = null;
+
+        // Pinch-to-zoom properties
+        this.isPinching = false;
+        this.initialPinchDistance = 0;
+        this.initialZoomScale = 1;
+        this.pinchCenter = { x: 0, y: 0 };
+
+        // Rubber band state
+        this.isOverscrolling = false;
+        this.overscrollX = 0;
+        this.overscrollY = 0;
 
         this.thumbnailData = null;
         this.lightbox = document.getElementById('lightbox');
@@ -1679,8 +1695,9 @@ class TurnPage {
             const dx = e.clientX - this.lastPanX;
             const dy = e.clientY - this.lastPanY;
 
-            this.panX += dx;
-            this.panY += dy;
+            // อัพเดท pan ก่อน
+            let newPanX = this.panX + dx;
+            let newPanY = this.panY + dy;
 
             const contentWidth = this.singlePageMode
                 ? this.originalPageWidth
@@ -1690,7 +1707,6 @@ class TurnPage {
             const displayWidth = window.innerWidth;
             const displayHeight = window.innerHeight;
 
-            // ใช้ GeometryHelper แทน
             const bounds = GeometryHelper.calculatePanBounds(
                 contentWidth,
                 contentHeight,
@@ -1699,9 +1715,39 @@ class TurnPage {
                 this.zoomScale
             );
 
-            const clamped = GeometryHelper.clampPan(this.panX, this.panY, bounds);
-            this.panX = clamped.panX;
-            this.panY = clamped.panY;
+            /* BEGIN Rubber Band Logic */
+            const maxPanX = bounds.maxPanX;
+            const maxPanY = bounds.maxPanY;
+
+            let isOverX = false;
+            let isOverY = false;
+
+            // X-axis - ตรวจสอบและใช้ rubber band
+            if (newPanX > maxPanX) {
+                isOverX = true;
+                const overX = newPanX - maxPanX;
+                newPanX = maxPanX + this.applyRubberBand(overX);
+            } else if (newPanX < -maxPanX) {
+                isOverX = true;
+                const overX = newPanX + maxPanX;
+                newPanX = -maxPanX + this.applyRubberBand(overX);
+            }
+
+            // Y-axis - ตรวจสอบและใช้ rubber band
+            if (newPanY > maxPanY) {
+                isOverY = true;
+                const overY = newPanY - maxPanY;
+                newPanY = maxPanY + this.applyRubberBand(overY);
+            } else if (newPanY < -maxPanY) {
+                isOverY = true;
+                const overY = newPanY + maxPanY;
+                newPanY = -maxPanY + this.applyRubberBand(overY);
+            }
+
+            this.isOverscrolling = isOverX || isOverY;
+            this.panX = newPanX;
+            this.panY = newPanY;
+            /* END Rubber Band Logic */
 
             this.lastPanX = e.clientX;
             this.lastPanY = e.clientY;
@@ -1724,6 +1770,12 @@ class TurnPage {
         if (this.isPanning) {
             this.isPanning = false;
             this.canvas.style.cursor = this.isZoomed ? 'grab' : 'pointer';
+
+            /* BEGIN Snap Back Logic */
+            if (this.isOverscrolling) {
+                this.snapBackToEdge();
+                return; // ออกก่อน ไม่ต้องทำอย่างอื่น
+            }
         }
 
         const clickDuration = Date.now() - this.mouseDownTime;
@@ -1849,7 +1901,59 @@ class TurnPage {
 
     /* ===== TOUCH EVENTS ===== */
 
+    // helper คำนวณระยะห่างระหว่างสองจุด touch
+    getTouchDistance(touch1, touch2) {
+        const dx = touch2.clientX - touch1.clientX;
+        const dy = touch2.clientY - touch1.clientY;
+        return Math.sqrt(dx * dx + dy * dy);
+    }
+
+    // helper คำนวณจุดกึ่งกลางระหว่างสองจุด touch
+    getTouchCenter(touch1, touch2) {
+        return {
+            x: (touch1.clientX + touch2.clientX) / 2,
+            y: (touch1.clientY + touch2.clientY) / 2
+        };
+    }
+
     onTouchStart(e) {
+
+        // 2 นิ้ว = pinch zoom
+        if (e.touches.length === 2) {
+            e.preventDefault();
+
+            // ยกเลิก single touch interactions
+            if (this.touchTimeout) {
+                clearTimeout(this.touchTimeout);
+                this.touchTimeout = null;
+            }
+            this.lastTouchTime = null;
+            this.dragging = false;
+
+            // เริ่ม pinch
+            this.isPinching = true;
+            this.initialPinchDistance = this.getTouchDistance(e.touches[0], e.touches[1]);
+            this.initialZoomScale = this.isZoomed ? this.zoomScale : 1;
+
+            const rect = this.canvas.getBoundingClientRect();
+            const center = this.getTouchCenter(e.touches[0], e.touches[1]);
+            this.pinchCenter = {
+                x: center.x - rect.left,
+                y: center.y - rect.top
+            };
+
+            // ถ้ายังไม่ได้ zoom ให้เตรียม zoom state
+            if (!this.isZoomed) {
+                this.originalPageWidth = this.pageWidth;
+                this.originalPageHeight = this.pageHeight;
+                this.originalCenterX = this.centerX;
+                this.originalCenterY = this.centerY;
+            }
+
+            return;
+        }
+
+        // 1 นิ้ว = ปกติ
         if (e.touches.length === 1) {
             e.preventDefault();
             const touch = e.touches[0];
@@ -1861,7 +1965,70 @@ class TurnPage {
     }
 
     onTouchMove(e) {
-        if (e.touches.length === 1) {
+
+        // Pinch zoom
+        if (e.touches.length === 2 && this.isPinching) {
+            e.preventDefault();
+
+            const currentDistance = this.getTouchDistance(e.touches[0], e.touches[1]);
+            const scale = currentDistance / this.initialPinchDistance;
+            let newZoomScale = this.initialZoomScale * scale;
+
+            // จำกัด zoom scale ระหว่าง 1-4
+            newZoomScale = GeometryHelper.clamp(newZoomScale, 1, 4);
+
+            // ถ้า zoom scale < 1.1 = zoom out กลับไปปกติ
+            if (newZoomScale < 1.1) {
+                if (this.isZoomed) {
+                    this.isZoomed = false;
+                    this.panX = 0;
+                    this.panY = 0;
+                    this.calculateSize();
+                    this.canvas.style.cursor = 'pointer';
+                }
+                return;
+            }
+
+            // เข้าสู่ zoom mode
+            if (!this.isZoomed) {
+                this.isZoomed = true;
+
+                const dpr = window.devicePixelRatio || 1;
+                const fullWidth = window.innerWidth;
+                const fullHeight = window.innerHeight;
+
+                this.canvas.width = fullWidth * dpr;
+                this.canvas.height = fullHeight * dpr;
+                this.canvas.style.width = fullWidth + 'px';
+                this.canvas.style.height = fullHeight + 'px';
+
+                this.ctx.setTransform(1, 0, 0, 1, 0, 0);
+                this.ctx.scale(dpr, dpr);
+
+                this.zoomedCenterX = fullWidth / 2;
+                this.zoomedCenterY = fullHeight / 2;
+
+                this.canvas.style.cursor = 'grab';
+            }
+
+            // อัพเดท zoom scale
+            this.zoomScale = newZoomScale;
+
+            // คำนวณ pan เพื่อให้จุดกึ่งกลางของ pinch อยู่ที่เดิม
+            const contentWidth = this.singlePageMode
+                ? this.originalPageWidth
+                : (this.originalPageWidth * 2);
+            const clickOffsetX = (this.pinchCenter.x - this.originalCenterX) / contentWidth;
+            const clickOffsetY = (this.pinchCenter.y - this.originalCenterY) / this.originalPageHeight;
+
+            this.panX = -clickOffsetX * contentWidth * (this.zoomScale - 1);
+            this.panY = -clickOffsetY * this.originalPageHeight * (this.zoomScale - 1);
+
+            return;
+        }
+
+        // 1 นิ้ว = ปกติ
+        if (e.touches.length === 1 && !this.isPinching) {
             e.preventDefault();
             const touch = e.touches[0];
             this.onMouseMove({ clientX: touch.clientX, clientY: touch.clientY });
@@ -1869,12 +2036,48 @@ class TurnPage {
     }
 
     onTouchEnd(e) {
+
+        // จบ pinch
+        if (this.isPinching) {
+            this.isPinching = false;
+
+            // ถ้า zoom น้อยกว่า 1.1 ให้ reset
+            if (this.zoomScale < 1.1) {
+                this.resetZoomState();
+            } else {
+                // คงค่า zoom ไว้
+                this.canvas.style.cursor = 'grab';
+            }
+
+            // ถ้ายังมีนิ้วอยู่ 1 นิ้ว ให้รอ interaction ต่อ
+            if (e.touches.length === 1) {
+                const touch = e.touches[0];
+                this.touchStartTime = Date.now();
+                this.touchStartX = touch.clientX;
+                this.touchStartY = touch.clientY;
+            }
+
+            return;
+        }
+
+        // Touch end ปกติ (1 นิ้ว)
         const touchDuration = Date.now() - this.touchStartTime;
         const touch = e.changedTouches[0];
         const moveDistance = Math.sqrt(
             Math.pow(touch.clientX - this.touchStartX, 2) +
             Math.pow(touch.clientY - this.touchStartY, 2)
         );
+
+        /* BEGIN Snap Back for Touch */
+        if (this.isPanning) {
+            this.isPanning = false;
+            this.canvas.style.cursor = this.isZoomed ? 'grab' : 'pointer';
+
+            if (this.isOverscrolling) {
+                this.snapBackToEdge();
+                return;
+            }
+        }
 
         if (touchDuration < TurnPage.CONFIG.CLICK_THRESHOLD_MS &&  // was 300
             moveDistance < TurnPage.CONFIG.MOVE_THRESHOLD_PX &&    // was 10
@@ -1983,9 +2186,17 @@ class TurnPage {
 
     resetZoomState() {
         this.isZoomed = false;
+        this.zoomScale = TurnPage.CONFIG.ZOOM_SCALE;
         this.panX = 0;
         this.panY = 0;
         this.isPanning = false;
+        this.isPinching = false;
+
+        /*  Reset Rubber Band */
+        this.isOverscrolling = false;
+        this.overscrollX = 0;
+        this.overscrollY = 0;
+
         this.originalPageWidth = null;
         this.originalPageHeight = null;
         this.originalCenterX = null;
@@ -1997,8 +2208,70 @@ class TurnPage {
         this.calculateSize();
     }
 
-    /* ===== LINK HANDLING ===== */
+    // helper rubber band คำนวนระยะที่ยืดตาม physics
+    applyRubberBand(distance) {
+        const resistance = TurnPage.CONFIG.RUBBER_BAND_RESISTANCE;
+        const maxDistance = TurnPage.CONFIG.RUBBER_BAND_MAX_DISTANCE;
 
+        // Formula: d * (1 - r) ^ (abs(d) / max)
+        // ยิ่งยืดมาก ยิ่งแข็งขึ้น (non-linear)
+        const sign = distance > 0 ? 1 : -1;
+        const absDistance = Math.abs(distance);
+        const damping = Math.pow(1 - resistance, absDistance / maxDistance);
+
+        return sign * absDistance * damping;
+    }
+
+    // helper rubber band ดีดกลับไปขอบเมื่อปล่อยมือ
+    snapBackToEdge() {
+        if (!this.isOverscrolling) return;
+
+        const contentWidth = this.singlePageMode
+            ? this.originalPageWidth
+            : (this.originalPageWidth * 2);
+        const contentHeight = this.originalPageHeight;
+        const displayWidth = window.innerWidth;
+        const displayHeight = window.innerHeight;
+
+        const bounds = GeometryHelper.calculatePanBounds(
+            contentWidth,
+            contentHeight,
+            displayWidth,
+            displayHeight,
+            this.zoomScale
+        );
+
+        const targetPanX = GeometryHelper.clamp(this.panX, -bounds.maxPanX, bounds.maxPanX);
+        const targetPanY = GeometryHelper.clamp(this.panY, -bounds.maxPanY, bounds.maxPanY);
+
+        const startPanX = this.panX;
+        const startPanY = this.panY;
+        const duration = TurnPage.CONFIG.RUBBER_BAND_SNAP_DURATION;
+        const startTime = performance.now();
+
+        const animate = (currentTime) => {
+            const elapsed = currentTime - startTime;
+            const progress = Math.min(elapsed / duration, 1);
+
+            // Ease-out cubic (เร็วแล้วช้าลง เหมือน spring)
+            const eased = 1 - Math.pow(1 - progress, 3);
+
+            this.panX = startPanX + (targetPanX - startPanX) * eased;
+            this.panY = startPanY + (targetPanY - startPanY) * eased;
+
+            if (progress < 1) {
+                requestAnimationFrame(animate);
+            } else {
+                this.isOverscrolling = false;
+                this.overscrollX = 0;
+                this.overscrollY = 0;
+            }
+        };
+
+        requestAnimationFrame(animate);
+    }
+
+    /* ===== LINK HANDLING ===== */
     getLinkAtPosition(x, y) {
         const cx = this.centerX;
         const topY = this.centerY - this.pageHeight / 2;
