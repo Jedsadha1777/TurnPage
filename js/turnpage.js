@@ -335,6 +335,10 @@ class TurnPage {
         this.isZoomRubberBanding = false;
         this.isAnimatingZoom = false;
         this.isResettingZoom = false;
+        // Lock เพื่อป้องกัน race condition ระหว่าง pinch zoom
+        this.isPinchZooming = false;
+        this.lockedSinglePageMode = null;
+        this.lockedOriginalDimensions = null;
 
         // Rubber band state
         this.isOverscrolling = false;
@@ -495,6 +499,11 @@ class TurnPage {
     }
 
     calculateSize() {
+
+        if (this.isPinching || this.isPinchZooming) {
+            return;
+        }
+
         const targetHeight = window.innerHeight;
         const maxWidth = window.innerWidth;
 
@@ -1952,8 +1961,7 @@ class TurnPage {
             this.lastTouchTime = null;
             this.dragging = false;
 
-            /* BEGIN FIX: เตรียม original dimensions ก่อนเสมอ */
-            // ตั้งค่า original ก่อน ไม่ว่าจะ zoom หรือไม่
+            /* BEGIN PATCH: Lock dimensions ทันทีที่เริ่ม pinch */
             if (!this.originalPageWidth) {
                 // เก็บขนาดหน้าเดียว (ไม่ใช่ canvas width)
                 this.originalPageWidth = this.pageWidth;
@@ -1961,12 +1969,20 @@ class TurnPage {
                 this.originalCenterX = this.centerX;
                 this.originalCenterY = this.centerY;
 
-                // เก็บขนาด canvas จริง (สำหรับ pinch center calculation)
-                this.originalCanvasWidth = this.singlePageMode
-                    ? this.pageWidth
-                    : (this.pageWidth * 2);
+                // Lock mode และ dimensions เพื่อป้องกัน race condition
+                this.lockedSinglePageMode = this.singlePageMode;
+
+                // คำนวณ canvas width ที่ถูกต้องตาม mode ที่ lock
+                this.originalCanvasWidth = this.lockedSinglePageMode
+                    ? this.originalPageWidth
+                    : (this.originalPageWidth * 2);
+
+                this.lockedOriginalDimensions = {
+                    pageWidth: this.originalPageWidth,
+                    pageHeight: this.originalPageHeight,
+                    canvasWidth: this.originalCanvasWidth
+                };
             }
-            /* END FIX */
 
             // เริ่ม pinch
             this.isPinching = true;
@@ -1979,6 +1995,9 @@ class TurnPage {
                 x: center.x - rect.left,
                 y: center.y - rect.top
             };
+
+            // ตั้ง flag ว่ากำลัง pinch zoom
+            this.isPinchZooming = true;
 
             return;
         }
@@ -1999,6 +2018,7 @@ class TurnPage {
         // ถ้ากำลัง pinch (2 นิ้ว) แต่ตอนนี้เหลือ 1 นิ้ว → reset pinch state
         if (this.isPinching && e.touches.length === 1) {
             this.isPinching = false;
+            this.isPinchZooming = false;
 
             // อย่าลืม snap zoom ถ้าอยู่ใน rubber band zone
             const minScale = TurnPage.CONFIG.ZOOM_MIN_SCALE;
@@ -2027,6 +2047,14 @@ class TurnPage {
         // Pinch zoom (2 นิ้ว)
         if (e.touches.length === 2 && this.isPinching) {
             e.preventDefault();
+
+            const rect = this.canvas.getBoundingClientRect();
+            const center = this.getTouchCenter(e.touches[0], e.touches[1]);
+            this.pinchCenter = {
+                x: center.x - rect.left,
+                y: center.y - rect.top
+            };
+
             const currentDistance = this.getTouchDistance(e.touches[0], e.touches[1]);
             const scale = currentDistance / this.initialPinchDistance;
             let newZoomScale = this.initialZoomScale * scale;
@@ -2059,9 +2087,11 @@ class TurnPage {
                     this.isZoomed = false;
                     this.panX = 0;
                     this.panY = 0;
-                    this.calculateSize();
+                    // ใช้ค่าจาก locked dimensions
+                    this.resetZoomWithLockedDimensions();
                     this.canvas.style.cursor = 'pointer';
                 }
+
                 return;
             }
 
@@ -2096,25 +2126,65 @@ class TurnPage {
             // อัพเดท zoom scale
             this.zoomScale = newZoomScale;
 
-            // คำนวณ pan
-            if (this.originalPageWidth && this.originalPageHeight &&
+            /* BEGIN ULTIMATE FIX: ใช้ actual content dimensions */
+            if (this.lockedOriginalDimensions) {
+                const locked = this.lockedOriginalDimensions;
+                // CRITICAL: ใช้ pageWidth จริง (มี padding/centering)
+                // locked.pageWidth = ขนาดหน้าเดี่ยว (ไม่รวม blank space)
+                const singlePageWidth = locked.pageWidth;
+                const contentWidth = this.lockedSinglePageMode
+                    ? singlePageWidth
+                    : (singlePageWidth * 2);
+                const contentHeight = locked.pageHeight;
+
+                // ใช้ originalCenterX ที่บันทึกไว้ (จุดกลาง display จริง)
+                // สำหรับหน้าคู่: centerX อาจไม่ใช่ pageWidth ถ้ามี blank space
+                const displayCenterX = this.originalCenterX;
+                const displayCenterY = this.originalCenterY;
+
+                // หา offset จากจุดกลาง canvas
+                const offsetX = this.pinchCenter.x - displayCenterX;
+                const offsetY = this.pinchCenter.y - displayCenterY;
+
+                // แปลงเป็น normalized (-0.5 ถึง 0.5)
+                // ต้องใช้ contentWidth เพื่อ normalize ให้ถูกต้อง
+                const normalizedX = offsetX / contentWidth;
+                const normalizedY = offsetY / contentHeight;
+
+                // คำนวณ pan
+                this.panX = -normalizedX * contentWidth * (this.zoomScale - 1);
+                this.panY = -normalizedY * contentHeight * (this.zoomScale - 1);
+
+            } else if (this.originalPageWidth && this.originalPageHeight &&
                 this.originalCenterX !== null && this.originalCenterY !== null) {
 
-                /* ใช้ originalCanvasWidth */
-                const clickOffsetX = (this.pinchCenter.x - this.originalCenterX) / this.originalCanvasWidth;
-                const clickOffsetY = (this.pinchCenter.y - this.originalCenterY) / this.originalPageHeight;
+                // Fallback: ใช้ logic เดียวกัน
+                const useSingleMode = this.lockedSinglePageMode !== null
+                    ? this.lockedSinglePageMode
+                    : this.singlePageMode;
 
-                const contentWidth = this.singlePageMode
+                const contentWidth = useSingleMode
                     ? this.originalPageWidth
                     : (this.originalPageWidth * 2);
 
-                this.panX = -clickOffsetX * contentWidth * (this.zoomScale - 1);
-                this.panY = -clickOffsetY * this.originalPageHeight * (this.zoomScale - 1);
+                const contentHeight = this.originalPageHeight;
 
+                const displayCenterX = this.originalCenterX;
+                const displayCenterY = this.originalCenterY;
+
+                const offsetX = this.pinchCenter.x - displayCenterX;
+                const offsetY = this.pinchCenter.y - displayCenterY;
+
+                const normalizedX = offsetX / contentWidth;
+                const normalizedY = offsetY / contentHeight;
+
+                this.panX = -normalizedX * contentWidth * (this.zoomScale - 1);
+                this.panY = -normalizedY * contentHeight * (this.zoomScale - 1);
             } else {
                 this.panX = 0;
                 this.panY = 0;
             }
+            /* END ULTIMATE FIX */
 
             return;
         }
@@ -2148,12 +2218,20 @@ class TurnPage {
             const dx = touch.clientX - this.lastPanX;
             const dy = touch.clientY - this.lastPanY;
 
+            /* BEGIN PATCH: ใช้ locked dimensions ถ้ามี */
+            const useSingleMode = this.lockedSinglePageMode !== null
+                ? this.lockedSinglePageMode
+                : this.singlePageMode;
+
+            const contentWidth = useSingleMode
+                ? this.originalPageWidth
+                : (this.originalPageWidth * 2);
+            /* END PATCH */
+
             let newPanX = this.panX + dx;
             let newPanY = this.panY + dy;
 
-            const contentWidth = this.singlePageMode
-                ? this.originalPageWidth
-                : (this.originalPageWidth * 2);
+
             const contentHeight = this.originalPageHeight;
             const displayWidth = window.innerWidth;
             const displayHeight = window.innerHeight;
@@ -2216,6 +2294,8 @@ class TurnPage {
         // จบ pinch
         if (this.isPinching) {
             this.isPinching = false;
+            this.isPinchZooming = false;
+
 
             const minScale = TurnPage.CONFIG.ZOOM_MIN_SCALE;
             const maxScale = TurnPage.CONFIG.ZOOM_MAX_SCALE;
@@ -2227,7 +2307,7 @@ class TurnPage {
                     this.snapZoomToScale(maxScale);
                 } else if (this.zoomScale < 1.1) {
                     /*  Reset ทันที */
-                    this.resetZoomState();
+                    this.resetZoomWithLockedDimensions();
                     return;
                 } else {
                     this.canvas.style.cursor = 'grab';
@@ -2445,6 +2525,41 @@ class TurnPage {
         this.originalCanvasWidth = null;
         this.canvas.style.cursor = 'pointer';
 
+        this.lockedSinglePageMode = null;
+        this.lockedOriginalDimensions = null;
+        this.isPinchZooming = false;
+
+        this.calculateSize();
+        this.isResettingZoom = false;
+    }
+
+    resetZoomWithLockedDimensions() {
+        this.isResettingZoom = true;
+        this.isZoomed = false;
+        this.zoomScale = 1;
+        this.panX = 0;
+        this.panY = 0;
+        this.isPanning = false;
+        this.isPinching = false;
+        this.isPinchZooming = false;
+
+        this.isOverscrolling = false;
+        this.overscrollX = 0;
+        this.overscrollY = 0;
+
+        this.originalPageWidth = null;
+        this.originalPageHeight = null;
+        this.originalCenterX = null;
+        this.originalCenterY = null;
+        this.zoomedCenterX = null;
+        this.zoomedCenterY = null;
+        this.originalCanvasWidth = null;
+
+        // Clear locked state
+        this.lockedSinglePageMode = null;
+        this.lockedOriginalDimensions = null;
+
+        this.canvas.style.cursor = 'pointer';
 
         this.calculateSize();
         this.isResettingZoom = false;
@@ -2709,13 +2824,11 @@ class TurnPage {
         this.ctx.save();
 
         // ถ้า zoom out เสร็จแล้ว (isZoomed = false) แต่ canvas ยังเต็มจอ
-        if (!this.isZoomed && !this.isZoomingOut &&
+        if (!this.isZoomed && !this.isZoomingOut && !this.isPinching && !this.isPinchZooming &&
             this.originalPageWidth !== null) {
 
-            // Resize canvas กลับไปขนาดปกติ
             this.calculateSize();
 
-            // Clear ค่า original
             this.originalPageWidth = null;
             this.originalPageHeight = null;
             this.originalCenterX = null;
@@ -2768,6 +2881,54 @@ class TurnPage {
         }
 
         this.ctx.restore();
+
+        /* DEBUG: แสดงพื้นที่และตัวเลข */
+        // if (this.isPinching && this.lockedOriginalDimensions) {
+        //     this.ctx.save();
+        //     this.ctx.resetTransform();
+
+        //     const locked = this.lockedOriginalDimensions;
+        //     const cw = this.lockedSinglePageMode ? locked.pageWidth : (locked.pageWidth * 2);
+        //     const offsetX = this.pinchCenter.x - this.originalCenterX;
+        //     const normalizedX = offsetX / cw;
+
+        //     // พื้นหลังดำ
+        //     this.ctx.fillStyle = 'rgba(0, 0, 0, 0.9)';
+        //     this.ctx.fillRect(5, 5, 400, 280);
+
+        //     // ข้อความ
+        //     this.ctx.fillStyle = 'white';
+        //     this.ctx.font = '16px monospace';
+
+        //     let y = 30;
+        //     this.ctx.fillText(`Mode: ${this.lockedSinglePageMode ? 'SINGLE' : 'DOUBLE'}`, 15, y); y += 25;
+        //     this.ctx.fillText(`---`, 15, y); y += 25;
+
+        //     // เช็คค่า null/undefined
+        //     this.ctx.fillStyle = this.originalCenterX === null ? 'red' : 'lime';
+        //     this.ctx.fillText(`originalCenterX: ${this.originalCenterX}`, 15, y); y += 25;
+
+        //     this.ctx.fillStyle = this.originalCenterY === null ? 'red' : 'lime';
+        //     this.ctx.fillText(`originalCenterY: ${this.originalCenterY}`, 15, y); y += 25;
+
+        //     this.ctx.fillStyle = 'white';
+        //     this.ctx.fillText(`pinchCenter.x: ${this.pinchCenter.x.toFixed(0)}`, 15, y); y += 25;
+        //     this.ctx.fillText(`pinchCenter.y: ${this.pinchCenter.y.toFixed(0)}`, 15, y); y += 25;
+        //     this.ctx.fillText(`---`, 15, y); y += 25;
+
+        //     this.ctx.fillText(`locked.pageWidth: ${locked.pageWidth.toFixed(0)}`, 15, y); y += 25;
+        //     this.ctx.fillText(`contentWidth: ${cw.toFixed(0)}`, 15, y); y += 25;
+
+        //     // เช็คค่าติดลบ
+        //     this.ctx.fillStyle = offsetX < 0 ? 'yellow' : 'cyan';
+        //     this.ctx.fillText(`offsetX: ${offsetX.toFixed(0)}`, 15, y); y += 25;
+
+        //     this.ctx.fillStyle = normalizedX < -0.5 || normalizedX > 0.5 ? 'red' : 'lime';
+        //     this.ctx.fillText(`normalizedX: ${normalizedX.toFixed(3)}`, 15, y);
+
+        //     this.ctx.restore();
+        // }
+        /* END DEBUG */
 
         requestAnimationFrame(() => this.animate());
     }
