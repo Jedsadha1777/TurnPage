@@ -874,6 +874,20 @@ class TurnPage {
                 height: layoutViewport.height
             };
 
+            // CRITICAL: Re-transform links เมื่อโหลด high-res
+            if (highRes && this.pageLinks[i] && this.pageLinks[i].length > 0) {
+                const oldLinks = this.pageLinks[i];
+                this.pageLinks[i] = oldLinks.map(link => {
+                    if (!link.transformedRect) return link;
+
+                    const [x1, y1, x2, y2] = link.transformedRect;
+
+                    // Links ถูกคำนวณจาก layoutViewport เดิม ไม่ต้อง re-scale
+                    return link;
+                });
+            }
+
+
             if (!this.pageLinks[i]) {
                 const annotations = await page.getAnnotations();
                 const transform = layoutViewport.transform;
