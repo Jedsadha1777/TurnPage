@@ -328,6 +328,7 @@ class TurnPage {
         this.initialPinchDistance = 0;
         this.initialZoomScale = 1;
         this.pinchCenter = { x: 0, y: 0 };
+        this.isZoomingOut = false;
 
         // Rubber band state
         this.isOverscrolling = false;
@@ -2147,20 +2148,19 @@ class TurnPage {
 
     handleZoom(e, x, y) {
         if (this.isZoomed) {
+            this.isZoomingOut = true;
+
             // Zoom out
             this.animateZoom(
                 this.zoomScale,      // from
                 1,                   // to
                 x, y,
                 () => {
-                    requestAnimationFrame(() => {  // ← รอ 1 frame
-                        this.isZoomed = false;
-                        this.panX = 0;
-                        this.panY = 0;
-                        this.skipClearOnce = true;
-                        this.calculateSize();
-                        this.canvas.style.cursor = 'pointer';
-                    });
+                    this.isZoomingOut = false;
+                    this.isZoomed = false;
+                    this.panX = 0;
+                    this.panY = 0;
+                    this.canvas.style.cursor = 'pointer';
                 }
             );
 
@@ -2461,7 +2461,23 @@ class TurnPage {
 
         this.ctx.save();
 
-        if (this.isZoomed) {
+        // ถ้า zoom out เสร็จแล้ว (isZoomed = false) แต่ canvas ยังเต็มจอ
+        if (!this.isZoomed && !this.isZoomingOut &&
+            this.originalPageWidth !== null) {
+
+            // Resize canvas กลับไปขนาดปกติ
+            this.calculateSize();
+
+            // Clear ค่า original
+            this.originalPageWidth = null;
+            this.originalPageHeight = null;
+            this.originalCenterX = null;
+            this.originalCenterY = null;
+            this.zoomedCenterX = null;
+            this.zoomedCenterY = null;
+        }
+
+        if (this.isZoomed || this.isZoomingOut) {
             // ใช้ center point ของ canvas เต็มจอ
             const centerX = this.zoomedCenterX || displayWidth / 2;
             const centerY = this.zoomedCenterY || displayHeight / 2;
