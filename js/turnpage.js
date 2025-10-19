@@ -251,6 +251,9 @@ class TurnPage {
         RUBBER_BAND_RESISTANCE: 0.3,      // ความแข็งของยาง (0-1, น้อย = ยืดง่าย)
         RUBBER_BAND_SNAP_DURATION: 300,   // เวลาดีดกลับ (ms)
         RUBBER_BAND_MAX_DISTANCE: 80,     // ระยะยืดสุด (px)
+
+        // Zoom Animation
+        ZOOM_ANIMATION_DURATION: 250,
     };
 
 
@@ -2145,11 +2148,22 @@ class TurnPage {
     handleZoom(e, x, y) {
         if (this.isZoomed) {
             // Zoom out
-            this.isZoomed = false;
-            this.panX = 0;
-            this.panY = 0;
-            this.calculateSize();
-            this.canvas.style.cursor = 'pointer';
+            this.animateZoom(
+                this.zoomScale,      // from
+                1,                   // to
+                x, y,
+                () => {
+                    requestAnimationFrame(() => {  // ← รอ 1 frame
+                        this.isZoomed = false;
+                        this.panX = 0;
+                        this.panY = 0;
+                        this.skipClearOnce = true;
+                        this.calculateSize();
+                        this.canvas.style.cursor = 'pointer';
+                    });
+                }
+            );
+
         } else {
             // Zoom in
             this.isZoomed = true;
@@ -2177,11 +2191,53 @@ class TurnPage {
             const clickOffsetX = (x - this.originalCenterX) / contentWidth;
             const clickOffsetY = (y - this.originalCenterY) / this.originalPageHeight;
 
-            this.panX = -clickOffsetX * contentWidth * (this.zoomScale - 1);
-            this.panY = -clickOffsetY * this.originalPageHeight * (this.zoomScale - 1);
+            const targetPanX = -clickOffsetX * contentWidth * (TurnPage.CONFIG.ZOOM_SCALE - 1);
+            const targetPanY = -clickOffsetY * this.originalPageHeight * (TurnPage.CONFIG.ZOOM_SCALE - 1);
+
+            this.animateZoom(
+                1,                          // from
+                TurnPage.CONFIG.ZOOM_SCALE, // to
+                x, y,
+                null,
+                targetPanX,
+                targetPanY
+            );
 
             this.canvas.style.cursor = 'grab';
         }
+    }
+
+    animateZoom(fromScale, toScale, centerX, centerY, onComplete, targetPanX = 0, targetPanY = 0) {
+        const duration = TurnPage.CONFIG.ZOOM_ANIMATION_DURATION;
+        const startTime = performance.now();
+        const startScale = fromScale;
+        const startPanX = this.panX;
+        const startPanY = this.panY;
+
+        const animate = (currentTime) => {
+            const elapsed = currentTime - startTime;
+            const progress = Math.min(elapsed / duration, 1);
+
+            const eased = 1 - Math.pow(1 - progress, 3);
+
+            this.zoomScale = startScale + (toScale - startScale) * eased;
+            this.panX = startPanX + (targetPanX - startPanX) * eased;
+            this.panY = startPanY + (targetPanY - startPanY) * eased;
+
+            if (progress < 1) {
+                requestAnimationFrame(animate);
+            } else {
+                this.zoomScale = toScale;
+                this.panX = targetPanX;
+                this.panY = targetPanY;
+
+                if (onComplete) {
+                    onComplete();
+                }
+            }
+        };
+
+        requestAnimationFrame(animate);
     }
 
     resetZoomState() {
