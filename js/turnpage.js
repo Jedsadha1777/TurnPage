@@ -1824,12 +1824,10 @@ class TurnPage {
 
             if (this.clickCount === 1) {
                 this.clickTimeout = setTimeout(() => {
-                    /* BEGIN FIX: อนุญาต toggle ทั้งตอน zoom และไม่ zoom */
-                    // ← เอา !this.isZoomed ออก
+                    /* อนุญาต toggle ทั้งตอน zoom และไม่ zoom */
                     if (distanceFromCenter <= centerZone) {
                         this.toggleControls();
                     }
-                    /* END FIX */
                     this.clickCount = 0;
                 }, TurnPage.CONFIG.SINGLE_CLICK_DELAY_MS);
             } else if (this.clickCount === 2) {
