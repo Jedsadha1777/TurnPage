@@ -334,6 +334,7 @@ class TurnPage {
         this.isZoomingOut = false;
         this.isZoomRubberBanding = false;
         this.isAnimatingZoom = false;
+        this.isResettingZoom = false;
 
         // Rubber band state
         this.isOverscrolling = false;
@@ -1366,6 +1367,11 @@ class TurnPage {
 
         this.singlePageMode = singlePage;
 
+        this.originalPageWidth = null;
+        this.originalPageHeight = null;
+        this.originalCenterX = null;
+        this.originalCenterY = null;
+
         // Snap currentPage เมื่อเปลี่ยนเป็นหน้าคู่
         if (!singlePage && this.currentPage > 0) {
             this.currentPage = PageCalculator.snapToValidPage(
@@ -1701,6 +1707,15 @@ class TurnPage {
 
     onMouseMove(e) {
         if (this.isPanning && this.isZoomed) {
+
+            if (this.isResettingZoom) {
+                return;
+            }
+
+            if (!this.originalPageWidth || !this.originalPageHeight) {
+                return;
+            }
+
             const dx = e.clientX - this.lastPanX;
             const dy = e.clientY - this.lastPanY;
 
@@ -1940,10 +1955,16 @@ class TurnPage {
             /* BEGIN FIX: เตรียม original dimensions ก่อนเสมอ */
             // ตั้งค่า original ก่อน ไม่ว่าจะ zoom หรือไม่
             if (!this.originalPageWidth) {
+                // เก็บขนาดหน้าเดียว (ไม่ใช่ canvas width)
                 this.originalPageWidth = this.pageWidth;
                 this.originalPageHeight = this.pageHeight;
                 this.originalCenterX = this.centerX;
                 this.originalCenterY = this.centerY;
+
+                // เก็บขนาด canvas จริง (สำหรับ pinch center calculation)
+                this.originalCanvasWidth = this.singlePageMode
+                    ? this.pageWidth
+                    : (this.pageWidth * 2);
             }
             /* END FIX */
 
@@ -1975,7 +1996,6 @@ class TurnPage {
 
     onTouchMove(e) {
 
-        /* BEGIN FIX: Handle transition from 2 fingers to 1 finger */
         // ถ้ากำลัง pinch (2 นิ้ว) แต่ตอนนี้เหลือ 1 นิ้ว → reset pinch state
         if (this.isPinching && e.touches.length === 1) {
             this.isPinching = false;
@@ -2007,12 +2027,11 @@ class TurnPage {
         // Pinch zoom (2 นิ้ว)
         if (e.touches.length === 2 && this.isPinching) {
             e.preventDefault();
-
             const currentDistance = this.getTouchDistance(e.touches[0], e.touches[1]);
             const scale = currentDistance / this.initialPinchDistance;
             let newZoomScale = this.initialZoomScale * scale;
 
-            /* BEGIN Zoom Rubber Band Logic */
+            /* Zoom Rubber Band Logic */
             const minScale = TurnPage.CONFIG.ZOOM_MIN_SCALE;
             const maxScale = TurnPage.CONFIG.ZOOM_MAX_SCALE;
             const rubberRange = TurnPage.CONFIG.ZOOM_RUBBER_BAND_RANGE;
@@ -2030,10 +2049,12 @@ class TurnPage {
             const absoluteMin = minScale - rubberRange;
             const absoluteMax = maxScale + rubberRange;
             newZoomScale = GeometryHelper.clamp(newZoomScale, absoluteMin, absoluteMax);
-            /* END Zoom Rubber Band Logic */
 
-            // ถ้า zoom scale < 1.1 = zoom out กลับไปปกติ
-            if (newZoomScale < 1.1 && !this.isZoomRubberBanding) {
+            // เช็คว่ากำลัง zoom out กลับไปปกติหรือไม่
+            if (newZoomScale < this.initialZoomScale &&
+                newZoomScale < 1.1 &&
+                !this.isZoomRubberBanding) {
+
                 if (this.isZoomed) {
                     this.isZoomed = false;
                     this.panX = 0;
@@ -2075,24 +2096,25 @@ class TurnPage {
             // อัพเดท zoom scale
             this.zoomScale = newZoomScale;
 
-            /* BEGIN FIX: ป้องกัน NaN ใน pan calculation */
+            // คำนวณ pan
             if (this.originalPageWidth && this.originalPageHeight &&
                 this.originalCenterX !== null && this.originalCenterY !== null) {
+
+                /* ใช้ originalCanvasWidth */
+                const clickOffsetX = (this.pinchCenter.x - this.originalCenterX) / this.originalCanvasWidth;
+                const clickOffsetY = (this.pinchCenter.y - this.originalCenterY) / this.originalPageHeight;
 
                 const contentWidth = this.singlePageMode
                     ? this.originalPageWidth
                     : (this.originalPageWidth * 2);
 
-                const clickOffsetX = (this.pinchCenter.x - this.originalCenterX) / contentWidth;
-                const clickOffsetY = (this.pinchCenter.y - this.originalCenterY) / this.originalPageHeight;
-
                 this.panX = -clickOffsetX * contentWidth * (this.zoomScale - 1);
                 this.panY = -clickOffsetY * this.originalPageHeight * (this.zoomScale - 1);
+
             } else {
                 this.panX = 0;
                 this.panY = 0;
             }
-            /* END FIX */
 
             return;
         }
@@ -2100,6 +2122,18 @@ class TurnPage {
         // 1 นิ้วขณะ zoom = pan
         if (e.touches.length === 1 && this.isZoomed && !this.isPinching) {
             e.preventDefault();
+
+
+            // ถ้ากำลัง reset → ไม่ทำอะไร
+            if (this.isResettingZoom) {
+                return;
+            }
+
+            // ถ้าไม่มี original dimensions → ไม่ทำอะไร
+            if (!this.originalPageWidth || !this.originalPageHeight) {
+                return;
+            }
+
             const touch = e.touches[0];
 
             // ถ้ายังไม่เคยตั้งค่า lastPan ให้ตั้งเป็นตำแหน่งปัจจุบัน
@@ -2192,7 +2226,9 @@ class TurnPage {
                 } else if (this.zoomScale > maxScale) {
                     this.snapZoomToScale(maxScale);
                 } else if (this.zoomScale < 1.1) {
+                    /*  Reset ทันที */
                     this.resetZoomState();
+                    return;
                 } else {
                     this.canvas.style.cursor = 'grab';
                     this.isZoomRubberBanding = false;
@@ -2208,6 +2244,7 @@ class TurnPage {
 
             return;
         }
+
 
         // Touch end ปกติ (1 นิ้ว)
         const touchDuration = Date.now() - this.touchStartTime;
@@ -2386,8 +2423,9 @@ class TurnPage {
     }
 
     resetZoomState() {
+        this.isResettingZoom = true;
         this.isZoomed = false;
-        this.zoomScale = TurnPage.CONFIG.ZOOM_SCALE;
+        this.zoomScale = 1;
         this.panX = 0;
         this.panY = 0;
         this.isPanning = false;
@@ -2404,9 +2442,12 @@ class TurnPage {
         this.originalCenterY = null;
         this.zoomedCenterX = null;
         this.zoomedCenterY = null;
+        this.originalCanvasWidth = null;
         this.canvas.style.cursor = 'pointer';
 
+
         this.calculateSize();
+        this.isResettingZoom = false;
     }
 
     // helper rubber band คำนวนระยะที่ยืดตาม physics
