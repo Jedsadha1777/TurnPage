@@ -257,6 +257,11 @@ class TurnPage {
         ZOOM_MIN_SCALE: 1,           // ขั้นต่ำ
         ZOOM_MAX_SCALE: 4,           // ขั้นสูงสุด
         ZOOM_RUBBER_BAND_RANGE: 0.3, // ระยะยืดได้นอกขีด (0.7-4.3)
+
+        // Link Display
+        LINK_FADE_DURATION: 2000,      // แสดง link 2 วินาทีแล้ว fade
+        LINK_FADE_OUT_SPEED: 0.1,
+        LINK_FADE_IN_SPEED: 0.2,
     };
 
 
@@ -360,6 +365,13 @@ class TurnPage {
         this.setupEvents();
         this.animate();
         this.resizeTimeout = null;
+
+        // Link display state
+        this.linkOpacity = 1;
+        this.linkFadeTimer = null;
+        this.hoveredLink = null;
+        this.lastMouseX = 0;
+        this.lastMouseY = 0;
 
         window.addEventListener('resize', () => {
             if (this.resizeTimeout) {
@@ -1272,6 +1284,7 @@ class TurnPage {
 
         this.loadPageRange(loadStart, loadEnd, false, false);
         this.updatePageInfo();
+        this.startLinkFadeTimer();
         this.cleanupUnusedPages();
 
         setTimeout(() => {
@@ -1362,6 +1375,8 @@ class TurnPage {
         this.flipDirection = dir;
         this.flipProgress = 0;
         this.flipTarget = target;
+        this.startLinkFadeTimer();
+
     }
 
     async setMode(singlePage) {
@@ -1710,8 +1725,18 @@ class TurnPage {
     }
 
     onMouseMove(e) {
-        if (this.isPanning && this.isZoomed) {
+        // 1. Track mouse position ก่อนเสมอ
+        const rect = this.canvas.getBoundingClientRect();
+        this.lastMouseX = e.clientX - rect.left;
+        this.lastMouseY = e.clientY - rect.top;
 
+        // 2. เช็ค link hover (ต้องทำก่อน logic อื่น!)
+        if (!this.isZoomed && !this.isPanning && !this.dragging) {
+            this.checkLinkHover(this.lastMouseX, this.lastMouseY);
+        }
+
+        // 3. Pan logic (มี return)
+        if (this.isPanning && this.isZoomed) {
             if (this.isResettingZoom) {
                 return;
             }
@@ -1723,7 +1748,6 @@ class TurnPage {
             const dx = e.clientX - this.lastPanX;
             const dy = e.clientY - this.lastPanY;
 
-            // อัพเดท pan ก่อน
             let newPanX = this.panX + dx;
             let newPanY = this.panY + dy;
 
@@ -1743,14 +1767,12 @@ class TurnPage {
                 this.zoomScale
             );
 
-            /* BEGIN Rubber Band Logic */
             const maxPanX = bounds.maxPanX;
             const maxPanY = bounds.maxPanY;
 
             let isOverX = false;
             let isOverY = false;
 
-            // X-axis - ตรวจสอบและใช้ rubber band
             if (newPanX > maxPanX) {
                 isOverX = true;
                 const overX = newPanX - maxPanX;
@@ -1761,7 +1783,6 @@ class TurnPage {
                 newPanX = -maxPanX + this.applyRubberBand(overX);
             }
 
-            // Y-axis - ตรวจสอบและใช้ rubber band
             if (newPanY > maxPanY) {
                 isOverY = true;
                 const overY = newPanY - maxPanY;
@@ -1775,15 +1796,14 @@ class TurnPage {
             this.isOverscrolling = isOverX || isOverY;
             this.panX = newPanX;
             this.panY = newPanY;
-            /* END Rubber Band Logic */
 
             this.lastPanX = e.clientX;
             this.lastPanY = e.clientY;
             return;
         }
 
+        // 4. Flip drag logic
         if (!this.dragging || this.isFlipping || this.isZoomed) return;
-        const rect = this.canvas.getBoundingClientRect();
         const x = e.clientX - rect.left;
         const dragDistance = x - this.dragStartX;
         const maxDrag = this.pageWidth;
@@ -2805,6 +2825,9 @@ class TurnPage {
                 this.flipDirection = 0;
                 this.updatePageInfo();
                 this.cleanupUnusedPages();
+                this.startLinkFadeTimer();
+
+
                 setTimeout(() => {
                     if (this.jsonData && this.highResImages.length > 0) {
                         this.loadHighResForCurrentPageFromJSON();
@@ -3210,10 +3233,6 @@ class TurnPage {
         const offsetX = (this.pageWidth - vp.width) / 2;
         const offsetY = (this.pageHeight - vp.height) / 2;
 
-        this.ctx.fillStyle = 'rgba(0, 100, 255, 0.2)';
-        this.ctx.strokeStyle = 'rgba(0, 100, 255, 0.5)';
-        this.ctx.lineWidth = 1;
-
         for (const link of this.pageLinks[pageIndex]) {
             if (!link.transformedRect) continue;
 
@@ -3223,9 +3242,148 @@ class TurnPage {
             const linkWidth = x2 - x1;
             const linkHeight = y2 - y1;
 
-            this.ctx.fillRect(linkLeft, linkTop, linkWidth, linkHeight);
-            this.ctx.strokeRect(linkLeft, linkTop, linkWidth, linkHeight);
+            // เช็คว่า mouse hover อยู่หรือไม่
+            const isHovered = this.hoveredLink &&
+                this.hoveredLink.pageIndex === pageIndex &&
+                this.hoveredLink.rect[0] === x1 &&
+                this.hoveredLink.rect[1] === y1 &&
+                this.hoveredLink.rect[2] === x2 &&
+                this.hoveredLink.rect[3] === y2;
+
+            const opacity = this.hoveredLink === null
+                ? this.linkOpacity
+                : (isHovered ? 1 : this.linkOpacity);
+
+
+            if (opacity > 0) {
+                this.ctx.fillStyle = `rgba(0, 100, 255, ${0.2 * opacity})`;
+                this.ctx.strokeStyle = `rgba(0, 100, 255, ${0.5 * opacity})`;
+                this.ctx.lineWidth = 1;
+
+                this.ctx.fillRect(linkLeft, linkTop, linkWidth, linkHeight);
+                this.ctx.strokeRect(linkLeft, linkTop, linkWidth, linkHeight);
+            }
         }
+    }
+
+    startLinkFadeTimer() {
+        // ยกเลิก timer เดิม
+        if (this.linkFadeTimer) {
+            clearTimeout(this.linkFadeTimer);
+        }
+
+        // Reset opacity เป็น 1 (แสดงเต็มที่)
+        this.linkOpacity = 1;
+
+        // ตั้ง timer ใหม่
+        this.linkFadeTimer = setTimeout(() => {
+            this.fadeLinkOut();
+        }, TurnPage.CONFIG.LINK_FADE_DURATION);
+    }
+
+    fadeLinkIn() {
+        if (this.linkOpacity < 1 && this.hoveredLink) {
+            this.linkOpacity += TurnPage.CONFIG.LINK_FADE_IN_SPEED;
+            this.linkOpacity = Math.min(1, this.linkOpacity);
+
+            if (this.linkOpacity < 1) {
+                requestAnimationFrame(() => this.fadeLinkIn());
+            }
+        }
+    }
+
+    fadeLinkOut() {
+        if (this.linkOpacity > 0 && !this.hoveredLink) {
+            this.linkOpacity -= TurnPage.CONFIG.LINK_FADE_OUT_SPEED;
+            this.linkOpacity = Math.max(0, this.linkOpacity);
+
+            if (this.linkOpacity > 0) {
+                requestAnimationFrame(() => this.fadeLinkOut());
+            }
+        }
+    }
+
+    checkLinkHover(x, y) {
+        const cx = this.centerX;
+        const topY = this.centerY - this.pageHeight / 2;
+
+        let foundLink = null;
+
+        if (this.singlePageMode) {
+            const pageX = cx - this.pageWidth / 2;
+            foundLink = this.checkLinkInPageForHover(this.currentPage, x, y, pageX, topY);
+        } else {
+            if (this.currentPage === 0) {
+                const rightPageX = cx;
+                foundLink = this.checkLinkInPageForHover(0, x, y, rightPageX, topY);
+            } else {
+                const leftPageX = cx - this.pageWidth;
+                const rightPageX = cx;
+
+                foundLink = this.checkLinkInPageForHover(this.currentPage, x, y, leftPageX, topY);
+                if (!foundLink) {
+                    foundLink = this.checkLinkInPageForHover(this.currentPage + 1, x, y, rightPageX, topY);
+                }
+            }
+        }
+
+        // Update hover state
+        const wasHovered = this.hoveredLink !== null;
+        this.hoveredLink = foundLink;
+        const isHovered = this.hoveredLink !== null;
+
+        // เปลี่ยน cursor
+        this.canvas.style.cursor = isHovered ? 'pointer' : (this.isZoomed ? 'grab' : 'default');
+
+        // ถ้าเริ่ม hover → fade IN แบบไว
+        if (!wasHovered && isHovered) {
+            // เริ่ม hover - fade out link ที่ไม่ได้ hover
+            if (this.linkFadeTimer) {
+                clearTimeout(this.linkFadeTimer);
+            }
+            this.fadeLinkOut();
+        }
+        // ถ้าหยุด hover → เริ่ม timer fade OUT ใหม่
+        else if (wasHovered && !isHovered) {
+            // หยุด hover - ตั้ง timer ให้ fade out หลังจาก delay
+            if (this.linkFadeTimer) {
+                clearTimeout(this.linkFadeTimer);
+            }
+            this.linkFadeTimer = setTimeout(() => {
+                this.fadeLinkOut();
+            }, TurnPage.CONFIG.LINK_FADE_DURATION);
+         }
+    }
+
+    checkLinkInPageForHover(pageIndex, clickX, clickY, pageX, pageY) {
+        if (!this.pageLinks || !this.pageLinks[pageIndex]) return null;
+
+        const vp = this.pageViewports[pageIndex];
+        if (!vp) return null;
+
+        const offsetX = (this.pageWidth - vp.width) / 2;
+        const offsetY = (this.pageHeight - vp.height) / 2;
+
+        for (const link of this.pageLinks[pageIndex]) {
+            if (!link.transformedRect) continue;
+
+            const [x1, y1, x2, y2] = link.transformedRect;
+            const linkLeft = pageX + offsetX + x1;
+            const linkRight = pageX + offsetX + x2;
+            const linkTop = pageY + offsetY + y1;
+            const linkBottom = pageY + offsetY + y2;
+
+            if (clickX >= linkLeft && clickX <= linkRight &&
+                clickY >= linkTop && clickY <= linkBottom) {
+                return {
+                    pageIndex: pageIndex,
+                    link: link,
+                    rect: [x1, y1, x2, y2]
+                };
+            }
+        }
+
+        return null;
     }
 
     easeInOutCubic(t) {
