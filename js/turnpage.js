@@ -839,6 +839,14 @@ class TurnPage {
 
             const layoutViewport = page.getViewport({ scale: baseScale });
 
+            // เก็บ viewport สำหรับ display (ครั้งเดียว)
+            if (!this.pageViewports[i]) {
+                this.pageViewports[i] = {
+                    width: layoutViewport.width,
+                    height: layoutViewport.height
+                };
+            }
+
             let renderScale;
             if (highRes) {
                 renderScale = baseScale * dpr;
@@ -860,29 +868,10 @@ class TurnPage {
 
             this.pages[i] = canvas;
 
-            // อัพเดท viewport
-            this.pageViewports[i] = {
-                width: layoutViewport.width,
-                height: layoutViewport.height
-            };
-
-            // CRITICAL: Re-transform links เมื่อโหลด high-res
-            if (highRes && this.pageLinks[i] && this.pageLinks[i].length > 0) {
-                const oldLinks = this.pageLinks[i];
-                this.pageLinks[i] = oldLinks.map(link => {
-                    if (!link.transformedRect) return link;
-
-                    const [x1, y1, x2, y2] = link.transformedRect;
-
-                    // Links ถูกคำนวณจาก layoutViewport เดิม ไม่ต้อง re-scale
-                    return link;
-                });
-            }
-
-
+            // ← CRITICAL FIX: ใช้ layoutViewport สำหรับ links เสมอ (ไม่ขึ้นกับ low/high-res)
             if (!this.pageLinks[i]) {
                 const annotations = await page.getAnnotations();
-                const transform = layoutViewport.transform;
+                const transform = layoutViewport.transform; // ← ใช้ layoutViewport
 
                 const applyTransform = (x, y, m) => [
                     m[0] * x + m[2] * y + m[4],
