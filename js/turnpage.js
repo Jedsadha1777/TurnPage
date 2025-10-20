@@ -839,14 +839,6 @@ class TurnPage {
 
             const layoutViewport = page.getViewport({ scale: baseScale });
 
-            // เก็บ viewport สำหรับใช้คำนวณ aspect ratio
-            if (!this.pageViewports[i]) {
-                this.pageViewports[i] = {
-                    width: layoutViewport.width,
-                    height: layoutViewport.height
-                };
-            }
-
             let renderScale;
             if (highRes) {
                 renderScale = baseScale * dpr;
