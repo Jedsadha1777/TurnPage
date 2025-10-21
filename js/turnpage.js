@@ -314,6 +314,13 @@ class TurnPage {
         this.lastPanX = 0;
         this.lastPanY = 0;
 
+        /* INERTIAL SCROLLING */
+        this.panVelocityX = 0;
+        this.panVelocityY = 0;
+        this.lastPanTime = 0;
+        this.isInertialScrolling = false;
+        this.inertiaAnimationId = null;
+
         /* hide - show control */
         this.clickTimeout = null;
         this.clickCount = 0;
@@ -1725,14 +1732,49 @@ class TurnPage {
     }
 
     onMouseMove(e) {
-        // 1. Track mouse position ก่อนเสมอ
-        const rect = this.canvas.getBoundingClientRect();
-        this.lastMouseX = e.clientX - rect.left;
-        this.lastMouseY = e.clientY - rect.top;
 
-        // 2. เช็ค link hover (ต้องทำก่อน logic อื่น!)
+        /*  INERTIAL SCROLLING - หยุด inertia เมื่อเริ่ม interact ใหม่ */
+        if (this.isInertialScrolling && (this.isPanning || this.dragging)) {
+            this.stopInertialScrolling();
+        }
+
+        /* 1. Track และแปลงตำแหน่ง mouse */
+        const rect = this.canvas.getBoundingClientRect();
+        const rawX = e.clientX - rect.left;
+        const rawY = e.clientY - rect.top;
+
+        this.lastMouseX = rawX;
+        this.lastMouseY = rawY;
+
+        // แปลงตำแหน่งสำหรับ link detection
+        let linkCheckX = rawX;
+        let linkCheckY = rawY;
+
+        if (this.isZoomed) {
+            const displayWidth = rect.width;
+            const displayHeight = rect.height;
+
+            const centerX = displayWidth / 2;
+            const centerY = displayHeight / 2;
+
+            const xAfterPan = rawX - centerX - this.panX;
+            const yAfterPan = rawY - centerY - this.panY;
+
+            const xAfterZoom = xAfterPan / this.zoomScale;
+            const yAfterZoom = yAfterPan / this.zoomScale;
+
+            const contentWidth = this.singlePageMode
+                ? this.originalPageWidth
+                : (this.originalPageWidth * 2);
+            linkCheckX = xAfterZoom + contentWidth / 2;
+            linkCheckY = yAfterZoom + this.originalPageHeight / 2;
+        }
+        // 2. เช็ค link hover ด้วยตำแหน่งที่แปลงแล้ว
         if (!this.isZoomed && !this.isPanning && !this.dragging) {
-            this.checkLinkHover(this.lastMouseX, this.lastMouseY);
+            this.checkLinkHover(linkCheckX, linkCheckY);
+        } else if (this.isZoomed && !this.isPanning && !this.dragging) {
+            // ตอน zoom ก็ต้องเช็ค hover ด้วย
+            this.checkLinkHover(linkCheckX, linkCheckY);
         }
 
         // 3. Pan logic (มี return)
@@ -1747,6 +1789,14 @@ class TurnPage {
 
             const dx = e.clientX - this.lastPanX;
             const dy = e.clientY - this.lastPanY;
+
+            /*  INERTIAL SCROLLING - Track velocity */
+            const currentTime = performance.now();
+            const deltaTime = currentTime - this.lastPanTime;
+            if (deltaTime > 0) {
+                this.panVelocityX = dx / deltaTime * 16.67; // normalize to 60fps
+                this.panVelocityY = dy / deltaTime * 16.67;
+            }
 
             let newPanX = this.panX + dx;
             let newPanY = this.panY + dy;
@@ -1799,6 +1849,8 @@ class TurnPage {
 
             this.lastPanX = e.clientX;
             this.lastPanY = e.clientY;
+
+            this.lastPanTime = currentTime;
             return;
         }
 
@@ -1820,7 +1872,23 @@ class TurnPage {
             this.canvas.style.cursor = this.isZoomed ? 'grab' : 'pointer';
 
             if (this.isOverscrolling) {
+               /* ยกเลิก inertia ถ้ามี overscroll */
+                this.panVelocityX = 0;
+                this.panVelocityY = 0;
+
                 this.snapBackToEdge();
+                return;
+            }
+
+            /*  INERTIAL SCROLLING - เริ่ม inertial scrolling */
+            const velocityThreshold = 0.5;
+            const velocityMagnitude = Math.sqrt(
+                this.panVelocityX * this.panVelocityX + 
+                this.panVelocityY * this.panVelocityY
+            );
+
+            if (velocityMagnitude > velocityThreshold && !this.isOverscrolling) {
+                this.startInertialScrolling();
                 return;
             }
         }
@@ -2219,8 +2287,9 @@ class TurnPage {
                 return;
             }
 
-            const touch = e.touches[0];
+             const touch = e.touches[0];
 
+            /*  INERTIAL SCROLLING - Track velocity สำหรับ touch */
             // ถ้ายังไม่เคยตั้งค่า lastPan ให้ตั้งเป็นตำแหน่งปัจจุบัน
             if (!this.isPanning) {
                 this.isPanning = true;
@@ -2232,6 +2301,13 @@ class TurnPage {
             // คำนวณ delta
             const dx = touch.clientX - this.lastPanX;
             const dy = touch.clientY - this.lastPanY;
+
+            const currentTime = performance.now();
+            const deltaTime = currentTime - this.lastPanTime;
+            if (deltaTime > 0) {
+                this.panVelocityX = dx / deltaTime * 16.67;
+                this.panVelocityY = dy / deltaTime * 16.67;
+            }           
 
             /* BEGIN PATCH: ใช้ locked dimensions ถ้ามี */
             const useSingleMode = this.lockedSinglePageMode !== null
@@ -2293,6 +2369,7 @@ class TurnPage {
 
             this.lastPanX = touch.clientX;
             this.lastPanY = touch.clientY;
+            this.lastPanTime = currentTime;
 
             return;
         }
@@ -2355,7 +2432,22 @@ class TurnPage {
             this.canvas.style.cursor = this.isZoomed ? 'grab' : 'pointer';
 
             if (this.isOverscrolling) {
+                this.panVelocityX = 0;
+                this.panVelocityY = 0;
+
                 this.snapBackToEdge();
+                return;
+            }
+
+            /*  INERTIAL SCROLLING - เริ่ม inertial scrolling สำหรับ touch */
+            const velocityThreshold = 0.5;
+            const velocityMagnitude = Math.sqrt(
+                this.panVelocityX * this.panVelocityX + 
+                this.panVelocityY * this.panVelocityY
+            );
+
+            if (velocityMagnitude > velocityThreshold && !this.isOverscrolling) {
+                this.startInertialScrolling();
                 return;
             }
         }
@@ -2517,6 +2609,110 @@ class TurnPage {
         requestAnimationFrame(animate);
     }
 
+    startInertialScrolling() {
+        if (!this.isZoomed) return;
+
+        this.isInertialScrolling = true;
+        this.inertiaStartTime = performance.now();
+
+        const animate = () => {
+            if (!this.isInertialScrolling) {
+                this.inertiaAnimationId = null;
+                return;
+            }
+
+            const currentTime = performance.now();
+            const elapsed = currentTime - this.inertiaStartTime;
+            
+            // Deceleration factor (ความเร็วในการชะลอตัว)
+            const deceleration = 0.95;
+            
+            // อัปเดต velocity ด้วยการลดลงแบบ exponential
+            this.panVelocityX *= deceleration;
+            this.panVelocityY *= deceleration;
+
+            // คำนวณ pan ใหม่
+            let newPanX = this.panX + this.panVelocityX;
+            let newPanY = this.panY + this.panVelocityY;
+
+            // คำนวณ bounds
+            const contentWidth = this.singlePageMode
+                ? this.originalPageWidth
+                : (this.originalPageWidth * 2);
+            const contentHeight = this.originalPageHeight;
+            const displayWidth = window.innerWidth;
+            const displayHeight = window.innerHeight;
+
+            const bounds = GeometryHelper.calculatePanBounds(
+                contentWidth,
+                contentHeight,
+                displayWidth,
+                displayHeight,
+                this.zoomScale
+            );
+
+            const maxPanX = bounds.maxPanX;
+            const maxPanY = bounds.maxPanY;
+
+            let hitBoundary = false;
+
+            // ตรวจสอบและจำกัด pan ภายใน bounds
+            if (newPanX > maxPanX) {
+                newPanX = maxPanX;
+                this.panVelocityX = 0;
+                hitBoundary = true;
+            } else if (newPanX < -maxPanX) {
+                newPanX = -maxPanX;
+                this.panVelocityX = 0;
+                hitBoundary = true;
+            }
+
+            if (newPanY > maxPanY) {
+                newPanY = maxPanY;
+                this.panVelocityY = 0;
+                hitBoundary = true;
+            } else if (newPanY < -maxPanY) {
+                newPanY = -maxPanY;
+                this.panVelocityY = 0;
+                hitBoundary = true;
+           }
+
+            this.panX = newPanX;
+            this.panY = newPanY;
+
+            // หยุด animation เมื่อความเร็วต่ำมาก หรือชนขอบ
+            const velocityMagnitude = Math.sqrt(
+                this.panVelocityX * this.panVelocityX + 
+                this.panVelocityY * this.panVelocityY
+            );
+
+            if (velocityMagnitude < 0.1 || hitBoundary) {
+                this.stopInertialScrolling();
+                return;
+            }
+
+            this.inertiaAnimationId = requestAnimationFrame(animate);
+        };
+
+        this.inertiaAnimationId = requestAnimationFrame(animate);
+    }
+
+    stopInertialScrolling() {
+        this.isInertialScrolling = false;
+        this.panVelocityX = 0;
+        this.panVelocityY = 0;
+        
+        if (this.inertiaAnimationId) {
+            cancelAnimationFrame(this.inertiaAnimationId);
+            this.inertiaAnimationId = null;
+        }
+    }
+
+    resetInertialScrolling() {
+        this.stopInertialScrolling();
+        this.lastPanTime = 0;
+    }
+
     resetZoomState() {
         this.isResettingZoom = true;
         this.isZoomed = false;
@@ -2545,6 +2741,7 @@ class TurnPage {
         this.isPinchZooming = false;
 
         this.calculateSize();
+        this.resetInertialScrolling();
         this.isResettingZoom = false;
     }
 
@@ -2577,6 +2774,7 @@ class TurnPage {
         this.canvas.style.cursor = 'pointer';
 
         this.calculateSize();
+        this.resetInertialScrolling();
         this.isResettingZoom = false;
     }
 
@@ -2706,25 +2904,53 @@ class TurnPage {
 
     /* ===== LINK HANDLING ===== */
     getLinkAtPosition(x, y) {
+
+        let adjustedX = x;
+        let adjustedY = y;
+
+        if (this.isZoomed) {
+            // คำนวณตำแหน่งย้อนกลับจาก zoom transform
+            const displayWidth = this.canvas.width / (window.devicePixelRatio || 1);
+            const displayHeight = this.canvas.height / (window.devicePixelRatio || 1);
+
+            const centerX = this.zoomedCenterX || displayWidth / 2;
+            const centerY = this.zoomedCenterY || displayHeight / 2;
+
+            // ลบ pan offset
+            const xAfterPan = x - centerX - this.panX;
+            const yAfterPan = y - centerY - this.panY;
+
+            // หารด้วย zoom scale
+            const xAfterZoom = xAfterPan / this.zoomScale;
+            const yAfterZoom = yAfterPan / this.zoomScale;
+
+            // บวก offset กลับมา
+            const contentWidth = this.singlePageMode
+                ? this.originalPageWidth
+                : (this.originalPageWidth * 2);
+            adjustedX = xAfterZoom + contentWidth / 2;
+            adjustedY = yAfterZoom + this.originalPageHeight / 2;
+        }
+
         const cx = this.centerX;
         const topY = this.centerY - this.pageHeight / 2;
 
         if (this.singlePageMode) {
             const pageX = cx - this.pageWidth / 2;
-            return this.checkLinkInPage(this.currentPage, x, y, pageX, topY);
+            return this.checkLinkInPage(this.currentPage, adjustedX, adjustedY, pageX, topY);
         } else {
             if (this.currentPage === 0) {
                 const rightPageX = cx;
-                return this.checkLinkInPage(0, x, y, rightPageX, topY);
+                return this.checkLinkInPage(0, adjustedX, adjustedY, rightPageX, topY);
             }
 
             const leftPageX = cx - this.pageWidth;
             const rightPageX = cx;
 
-            const leftLink = this.checkLinkInPage(this.currentPage, x, y, leftPageX, topY);
+            const leftLink = this.checkLinkInPage(this.currentPage, adjustedX, adjustedY, leftPageX, topY);
             if (leftLink) return leftLink;
 
-            const rightLink = this.checkLinkInPage(this.currentPage + 1, x, y, rightPageX, topY);
+            const rightLink = this.checkLinkInPage(this.currentPage + 1, adjustedX, adjustedY, rightPageX, topY);
             if (rightLink) return rightLink;
         }
 
@@ -3323,6 +3549,7 @@ class TurnPage {
                 foundLink = this.checkLinkInPageForHover(this.currentPage, x, y, leftPageX, topY);
                 if (!foundLink) {
                     foundLink = this.checkLinkInPageForHover(this.currentPage + 1, x, y, rightPageX, topY);
+
                 }
             }
         }
@@ -3352,7 +3579,7 @@ class TurnPage {
             this.linkFadeTimer = setTimeout(() => {
                 this.fadeLinkOut();
             }, TurnPage.CONFIG.LINK_FADE_DURATION);
-         }
+        }
     }
 
     checkLinkInPageForHover(pageIndex, clickX, clickY, pageX, pageY) {

@@ -10,7 +10,7 @@ https://jedsadha1777.github.io/turnpage/
 ## Features
 - PDF direct loading or pre-processed images (low/high-res)
 - Page flip animation
-- Zoom & pan
+- Zoom & pan 
 - Hyperlink support (internal/external)
 - Auto portrait/landscape mode
 - Touch support (iOS/Android)
@@ -74,6 +74,7 @@ new TurnPage('canvasId', {
   pdfUrl: 'file.pdf',           // PDF source
   jsonUrl: 'data/index.json',   // Pre-processed source
   autoLoad: true,               // Auto-load on init
+  startWithCover: true,         // The first page in double-page mode is empty / not empty
   singlePageMode: false,        // true = single, false = double page
   autoDetectMode: true          // Auto-detect portrait/landscape
 });
